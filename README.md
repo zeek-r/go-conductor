@@ -1,5 +1,9 @@
 # go-conductor
 
+[![GitHub build status](https://github.com/zeek-r/go-conductor/workflows/build/badge.svg)](https://github.com/zeek-r/go-conductor/actions)
+[![GitHub test status](https://github.com/zeek-r/go-conductor/workflows/tests/badge.svg)](https://github.com/zeek-r/go-conductor/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
 A lightweight HTTP request multiplexer that sends a single request to multiple backend services and returns the response from the primary service.
 
 ## How It Works
