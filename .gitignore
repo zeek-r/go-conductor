@@ -5,6 +5,7 @@
 *.so
 *.dylib
 go-conductor
+bin/
 
 # Test binary, built with `go test -c`
 *.test
