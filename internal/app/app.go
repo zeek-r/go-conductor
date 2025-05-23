@@ -42,10 +42,25 @@ func Run() {
 	// Create proxy conductor
 	conductor := proxy.NewConductor(cfg)
 
-	// Setup the server
+	// Setup main server mux
+	mainMux := http.NewServeMux()
+
+	// Setup proxy as the main handler for all non-special paths
+	mainMux.Handle("/", conductor)
+
+	// Setup metrics endpoints if enabled
+	if cfg.Metrics.Enabled {
+		proxy.SetupMetricsEndpoints(mainMux, conductor)
+		logger.InfoWithFields("Metrics collection enabled", map[string]interface{}{
+			"endpoint":   cfg.Metrics.Endpoint,
+			"prometheus": cfg.Metrics.EnablePrometheus,
+		})
+	}
+
+	// Setup the server with our mux that includes both proxy and metrics
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: conductor,
+		Handler: mainMux,
 	}
 
 	// Start the server in a goroutine

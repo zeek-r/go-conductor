@@ -11,6 +11,12 @@ logging:
   timeFormat: "2006-01-02T15:04:05Z07:00"  # RFC3339 format
   disableTimestamp: false   # set to true to disable timestamps
 
+# Metrics configuration
+metrics:
+  enabled: true              # enable metrics collection
+  endpoint: "/metrics"       # endpoint to expose metrics
+  enablePrometheus: true     # use Prometheus format metrics
+
 services:
   - name: api-service-primary
     url: http://localhost:8081

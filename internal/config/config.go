@@ -14,6 +14,7 @@ type Config struct {
 	Services []Service     `yaml:"services"`
 	Timeout  int           `yaml:"timeout,omitempty"` // Timeout in seconds for requests
 	Logging  logger.Config `yaml:"logging,omitempty"` // Logging configuration
+	Metrics  MetricsConfig `yaml:"metrics,omitempty"` // Metrics configuration
 }
 
 // Service defines a backend service to proxy to
@@ -26,6 +27,13 @@ type Service struct {
 	Primary    bool              `yaml:"primary,omitempty"`
 	Headers    map[string]string `yaml:"headers,omitempty"`
 	Weight     int               `yaml:"weight,omitempty"` // For future use with load balancing
+}
+
+// MetricsConfig defines how metrics are collected and exposed
+type MetricsConfig struct {
+	Enabled          bool   `yaml:"enabled"`          // Whether metrics collection is enabled
+	Endpoint         string `yaml:"endpoint"`         // Endpoint path to expose metrics (e.g., /metrics)
+	EnablePrometheus bool   `yaml:"enablePrometheus"` // Enable Prometheus format metrics
 }
 
 // Load reads the configuration from the specified file
@@ -48,6 +56,13 @@ func Load(filename string) (*Config, error) {
 	// Set default timeout if not specified
 	if config.Timeout == 0 {
 		config.Timeout = 30 // 30 seconds
+	}
+
+	// Set default metrics settings if enabled but not configured
+	if config.Metrics.Enabled {
+		if config.Metrics.Endpoint == "" {
+			config.Metrics.Endpoint = "/metrics"
+		}
 	}
 
 	// Validate that at least one service is marked as primary

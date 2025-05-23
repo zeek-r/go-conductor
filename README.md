@@ -88,6 +88,12 @@ logging:
   timeFormat: "2006-01-02T15:04:05Z07:00"  # RFC3339 format
   disableTimestamp: false
 
+# Metrics configuration
+metrics:
+  enabled: true              # enable metrics collection
+  endpoint: "/metrics"       # endpoint to expose metrics
+  enablePrometheus: true     # use Prometheus format metrics
+
 services:
   - name: api-service-primary
     url: http://localhost:8081
@@ -187,6 +193,7 @@ You can also use the test script to run a complete test flow:
 - `timeout`: Request timeout in seconds (default: 30)
 - `services`: A list of backend services to proxy to
 - `logging`: Logging configuration options
+- `metrics`: Metrics collection configuration options
 
 ### Service Configuration
 
@@ -207,6 +214,12 @@ You can also use the test script to run a complete test flow:
 - `includeCaller`: Whether to include caller information (file/line) in logs
 - `timeFormat`: Time format string for log timestamps (default: RFC3339)
 - `disableTimestamp`: If true, timestamps will be omitted from logs
+
+### Metrics Configuration
+
+- `enabled`: Enable metrics collection (true/false)
+- `endpoint`: Path to expose metrics (default: "/metrics")
+- `enablePrometheus`: Use Prometheus format for metrics instead of JSON (true/false)
 
 ## Development
 
