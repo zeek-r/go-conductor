@@ -23,6 +23,7 @@ type Conductor struct {
 	routesByPrefix map[string][]*Service
 	routesByExact  map[string][]*Service
 	routesByPath   map[string][]*Service
+	metrics        *MetricsCollector // Metrics collector for conductor operations
 }
 
 // Service represents a backend service with its configuration
