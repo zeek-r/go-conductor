@@ -1,0 +1,40 @@
+# go-conductor configuration
+port: 8086
+timeout: 10  # request timeout in seconds
+
+# Logging configuration
+logging:
+  level: info          # debug, info, warn, error, fatal
+  format: json         # json, pretty
+  output: stdout       # stdout, stderr, file
+  includeCaller: true  # include caller information (file/line)
+  timeFormat: "2006-01-02T15:04:05Z07:00"  # RFC3339 format
+  disableTimestamp: false   # set to true to disable timestamps
+
+services:
+  - name: api-service-primary
+    url: http://localhost:8081
+    pathPrefix: /api
+    primary: true
+    headers:
+      X-Proxy-Service: api-service-primary
+
+  - name: api-service-secondary
+    url: http://localhost:8082
+    pathPrefix: /api
+    headers:
+      X-Proxy-Service: api-service-secondary
+
+  - name: web-service
+    url: http://localhost:8083
+    pathPrefix: /web
+    primary: true
+    headers:
+      X-Proxy-Service: web-service
+
+  - name: default-service
+    url: http://localhost:8084
+    path: /
+    primary: true
+    headers:
+      X-Proxy-Service: default-service 
