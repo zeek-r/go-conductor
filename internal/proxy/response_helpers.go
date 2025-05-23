@@ -82,7 +82,15 @@ func (c *Conductor) writeResponse(w http.ResponseWriter, result *serviceResult, 
 
 	// Copy response body
 	if result.body != nil {
-		w.Write(result.body)
+		_, err := w.Write(result.body)
+		if err != nil {
+			logger.ErrorWithFields("Failed to write response body", err, map[string]interface{}{
+				"method":       r.Method,
+				"path":         r.URL.Path,
+				"status_code":  result.resp.StatusCode,
+				"service_used": result.service.Name,
+			})
+		}
 	}
 
 	// Log request completion
@@ -93,4 +101,4 @@ func (c *Conductor) writeResponse(w http.ResponseWriter, result *serviceResult, 
 		"service_used": result.service.Name,
 		"duration_ms":  time.Since(requestStart).Milliseconds(),
 	})
-} 
+}
