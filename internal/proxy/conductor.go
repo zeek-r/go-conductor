@@ -34,6 +34,14 @@ type Service struct {
 	Config  config.Service
 }
 
+// serviceResult holds the result from a service request
+type serviceResult struct {
+	service *Service
+	resp    *http.Response
+	body    []byte
+	err     error
+}
+
 // NewConductor creates a new Conductor with the provided configuration
 func NewConductor(cfg *config.Config) *Conductor {
 	timeout := time.Duration(cfg.Timeout) * time.Second
@@ -50,8 +58,15 @@ func NewConductor(cfg *config.Config) *Conductor {
 		routesByPath:   make(map[string][]*Service),
 	}
 
-	// Initialize each service
-	for i, svcConfig := range cfg.Services {
+	// Initialize services
+	conductor.initializeServices(cfg.Services)
+
+	return conductor
+}
+
+// initializeServices sets up service routing based on configuration
+func (c *Conductor) initializeServices(servicesConfig []config.Service) {
+	for i, svcConfig := range servicesConfig {
 		targetURL, err := url.Parse(svcConfig.URL)
 		if err != nil {
 			logger.Fatal(fmt.Sprintf("Invalid target URL %s", svcConfig.URL), err)
@@ -65,22 +80,20 @@ func NewConductor(cfg *config.Config) *Conductor {
 			Config:  svcConfig,
 		}
 
-		conductor.services[i] = service
+		c.services[i] = service
 
 		// Register service by path type for easier lookup
 		if svcConfig.PathExact != "" {
-			conductor.routesByExact[svcConfig.PathExact] = append(
-				conductor.routesByExact[svcConfig.PathExact], service)
+			c.routesByExact[svcConfig.PathExact] = append(
+				c.routesByExact[svcConfig.PathExact], service)
 		} else if svcConfig.PathPrefix != "" {
-			conductor.routesByPrefix[svcConfig.PathPrefix] = append(
-				conductor.routesByPrefix[svcConfig.PathPrefix], service)
+			c.routesByPrefix[svcConfig.PathPrefix] = append(
+				c.routesByPrefix[svcConfig.PathPrefix], service)
 		} else if svcConfig.Path != "" {
-			conductor.routesByPath[svcConfig.Path] = append(
-				conductor.routesByPath[svcConfig.Path], service)
+			c.routesByPath[svcConfig.Path] = append(
+				c.routesByPath[svcConfig.Path], service)
 		}
 	}
-
-	return conductor
 }
 
 // ServeHTTP implements the http.Handler interface
@@ -90,11 +103,7 @@ func (c *Conductor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Find matching services
 	services := c.findMatchingServices(r)
 	if len(services) == 0 {
-		logger.WarnWithFields("No service found for request", map[string]interface{}{
-			"method": r.Method,
-			"path":   r.URL.Path,
-		})
-		http.Error(w, "No service found for request", http.StatusNotFound)
+		c.handleNoServiceFound(w, r)
 		return
 	}
 
@@ -110,16 +119,59 @@ func (c *Conductor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Read the body once so we can send it to multiple services
-	var requestBody []byte
-	if r.Body != nil {
-		requestBody, _ = io.ReadAll(r.Body)
-		r.Body.Close()
+	requestBody, err := c.readRequestBody(r)
+	if err != nil {
+		logger.ErrorWithFields("Failed to read request body", err, map[string]interface{}{
+			"method": r.Method,
+			"path":   r.URL.Path,
+		})
+		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		return
 	}
 
 	// Fan out requests to all matching services
 	resultChan := c.fanOutRequests(ctx, services, r, requestBody)
 
-	// Get the result from the primary service only
+	// Process results and select the appropriate response
+	resultToUse := c.processResults(resultChan, r)
+	if resultToUse == nil {
+		logger.ErrorWithFields("All services failed", nil, map[string]interface{}{
+			"method": r.Method,
+			"path":   r.URL.Path,
+		})
+		http.Error(w, "All services failed", http.StatusBadGateway)
+		return
+	}
+
+	// Send the response back to the client
+	c.writeResponse(w, resultToUse, r, requestStart)
+}
+
+// handleNoServiceFound handles the case when no service matches the request
+func (c *Conductor) handleNoServiceFound(w http.ResponseWriter, r *http.Request) {
+	logger.WarnWithFields("No service found for request", map[string]interface{}{
+		"method": r.Method,
+		"path":   r.URL.Path,
+	})
+	http.Error(w, "No service found for request", http.StatusNotFound)
+}
+
+// readRequestBody reads the request body and returns it as a byte slice
+func (c *Conductor) readRequestBody(r *http.Request) ([]byte, error) {
+	var requestBody []byte
+	if r.Body != nil {
+		var err error
+		requestBody, err = io.ReadAll(r.Body)
+		r.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return requestBody, nil
+}
+
+// processResults processes the results from all services and returns the one to use
+func (c *Conductor) processResults(resultChan <-chan *serviceResult, r *http.Request) *serviceResult {
 	var primaryResult *serviceResult
 	var anyResult *serviceResult
 
@@ -146,9 +198,7 @@ func (c *Conductor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use primary result if available, otherwise use any successful result
-	var resultToUse *serviceResult
 	if primaryResult != nil {
-		resultToUse = primaryResult
 		logger.InfoWithFields("Using response from primary service", map[string]interface{}{
 			"service":      primaryResult.service.Name,
 			"status_code":  primaryResult.resp.StatusCode,
@@ -156,8 +206,8 @@ func (c *Conductor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"method":       r.Method,
 			"path":         r.URL.Path,
 		})
+		return primaryResult
 	} else if anyResult != nil {
-		resultToUse = anyResult
 		logger.WarnWithFields("Primary service did not respond, using response from secondary service",
 			map[string]interface{}{
 				"service":      anyResult.service.Name,
@@ -166,36 +216,35 @@ func (c *Conductor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"method":       r.Method,
 				"path":         r.URL.Path,
 			})
-	} else {
-		logger.ErrorWithFields("All services failed", nil, map[string]interface{}{
-			"method": r.Method,
-			"path":   r.URL.Path,
-		})
-		http.Error(w, "All services failed", http.StatusBadGateway)
-		return
+		return anyResult
 	}
 
+	return nil
+}
+
+// writeResponse writes the service response back to the client
+func (c *Conductor) writeResponse(w http.ResponseWriter, result *serviceResult, r *http.Request, requestStart time.Time) {
 	// Copy response headers
-	for k, values := range resultToUse.resp.Header {
+	for k, values := range result.resp.Header {
 		for _, v := range values {
 			w.Header().Add(k, v)
 		}
 	}
 
 	// Set status code
-	w.WriteHeader(resultToUse.resp.StatusCode)
+	w.WriteHeader(result.resp.StatusCode)
 
 	// Copy response body
-	if resultToUse.body != nil {
-		w.Write(resultToUse.body)
+	if result.body != nil {
+		w.Write(result.body)
 	}
 
 	// Log request completion
 	logger.DebugWithFields("Request completed", map[string]interface{}{
 		"method":       r.Method,
 		"path":         r.URL.Path,
-		"status_code":  resultToUse.resp.StatusCode,
-		"service_used": resultToUse.service.Name,
+		"status_code":  result.resp.StatusCode,
+		"service_used": result.service.Name,
 		"duration_ms":  time.Since(requestStart).Milliseconds(),
 	})
 }
@@ -209,14 +258,6 @@ func getServiceNames(services []*Service) []string {
 	return names
 }
 
-// serviceResult holds the result from a service request
-type serviceResult struct {
-	service *Service
-	resp    *http.Response
-	body    []byte
-	err     error
-}
-
 // fanOutRequests sends the request to all services and returns a channel for the results
 func (c *Conductor) fanOutRequests(ctx context.Context, services []*Service, originalReq *http.Request, requestBody []byte) <-chan *serviceResult {
 	resultChan := make(chan *serviceResult, len(services))
@@ -226,71 +267,8 @@ func (c *Conductor) fanOutRequests(ctx context.Context, services []*Service, ori
 		wg.Add(1)
 		go func(svc *Service) {
 			defer wg.Done()
-
-			// Create a new request for this service
-			targetURL := c.createTargetURL(svc, originalReq)
-
-			logger.DebugWithFields("Proxying request", map[string]interface{}{
-				"service":     svc.Name,
-				"target_url":  targetURL,
-				"source_path": originalReq.URL.Path,
-			})
-
-			// Create request with provided body
-			req, err := http.NewRequestWithContext(ctx, originalReq.Method, targetURL, bytes.NewReader(requestBody))
-			if err != nil {
-				resultChan <- &serviceResult{service: svc, err: err}
-				return
-			}
-
-			// Copy headers
-			for k, values := range originalReq.Header {
-				for _, v := range values {
-					req.Header.Add(k, v)
-				}
-			}
-
-			// Add custom headers for this service
-			for k, v := range svc.Config.Headers {
-				req.Header.Set(k, v)
-			}
-
-			// Send request
-			requestStart := time.Now()
-			resp, err := c.client.Do(req)
-			requestDuration := time.Since(requestStart)
-
-			if err != nil {
-				logger.ErrorWithFields("Request to service failed", err, map[string]interface{}{
-					"service":     svc.Name,
-					"target_url":  targetURL,
-					"duration_ms": requestDuration.Milliseconds(),
-				})
-				resultChan <- &serviceResult{service: svc, err: err}
-				return
-			}
-			defer resp.Body.Close()
-
-			// Read response body
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				resultChan <- &serviceResult{service: svc, resp: resp, err: err}
-				return
-			}
-
-			logger.DebugWithFields("Service response received", map[string]interface{}{
-				"service":      svc.Name,
-				"status_code":  resp.StatusCode,
-				"duration_ms":  requestDuration.Milliseconds(),
-				"response_len": len(body),
-			})
-
-			resultChan <- &serviceResult{
-				service: svc,
-				resp:    resp,
-				body:    body,
-				err:     nil,
-			}
+			result := c.makeServiceRequest(ctx, svc, originalReq, requestBody)
+			resultChan <- result
 		}(service)
 	}
 
@@ -301,6 +279,82 @@ func (c *Conductor) fanOutRequests(ctx context.Context, services []*Service, ori
 	}()
 
 	return resultChan
+}
+
+// makeServiceRequest makes a request to a single service and returns the result
+func (c *Conductor) makeServiceRequest(ctx context.Context, svc *Service, originalReq *http.Request, requestBody []byte) *serviceResult {
+	// Create a new request for this service
+	targetURL := c.createTargetURL(svc, originalReq)
+
+	logger.DebugWithFields("Proxying request", map[string]interface{}{
+		"service":     svc.Name,
+		"target_url":  targetURL,
+		"source_path": originalReq.URL.Path,
+	})
+
+	// Create request with provided body
+	req, err := http.NewRequestWithContext(ctx, originalReq.Method, targetURL, bytes.NewReader(requestBody))
+	if err != nil {
+		return &serviceResult{service: svc, err: err}
+	}
+
+	// Copy headers and add custom ones
+	c.copyAndAugmentHeaders(req, originalReq, svc)
+
+	// Send request and process response
+	return c.sendRequest(svc, req, targetURL)
+}
+
+// copyAndAugmentHeaders copies the original request headers and adds service-specific headers
+func (c *Conductor) copyAndAugmentHeaders(req *http.Request, originalReq *http.Request, svc *Service) {
+	// Copy original headers
+	for k, values := range originalReq.Header {
+		for _, v := range values {
+			req.Header.Add(k, v)
+		}
+	}
+
+	// Add custom headers for this service
+	for k, v := range svc.Config.Headers {
+		req.Header.Set(k, v)
+	}
+}
+
+// sendRequest sends the HTTP request and returns the result
+func (c *Conductor) sendRequest(svc *Service, req *http.Request, targetURL string) *serviceResult {
+	requestStart := time.Now()
+	resp, err := c.client.Do(req)
+	requestDuration := time.Since(requestStart)
+
+	if err != nil {
+		logger.ErrorWithFields("Request to service failed", err, map[string]interface{}{
+			"service":     svc.Name,
+			"target_url":  targetURL,
+			"duration_ms": requestDuration.Milliseconds(),
+		})
+		return &serviceResult{service: svc, err: err}
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &serviceResult{service: svc, resp: resp, err: err}
+	}
+
+	logger.DebugWithFields("Service response received", map[string]interface{}{
+		"service":      svc.Name,
+		"status_code":  resp.StatusCode,
+		"duration_ms":  requestDuration.Milliseconds(),
+		"response_len": len(body),
+	})
+
+	return &serviceResult{
+		service: svc,
+		resp:    resp,
+		body:    body,
+		err:     nil,
+	}
 }
 
 // createTargetURL creates the target URL for the proxy request
